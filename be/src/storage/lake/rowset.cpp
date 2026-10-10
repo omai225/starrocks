@@ -367,6 +367,7 @@ StatusOr<std::vector<ChunkIteratorPtr>> Rowset::read(const Schema& schema, const
     const std::unordered_set<int>* skip_ptr = skip_segment_idxs.empty() ? nullptr : &skip_segment_idxs;
     RETURN_IF_ERROR(load_segments(&segments, seg_options, nullptr, skip_ptr));
 
+<<<<<<< HEAD
     // Update segments_read_count after filtering
     if (options.stats) {
         options.stats->segments_read_count += num_segments() - skip_segment_idxs.size();
@@ -374,6 +375,20 @@ StatusOr<std::vector<ChunkIteratorPtr>> Rowset::read(const Schema& schema, const
 
     for (int i = 0; i < segments.size(); i++) {
         auto& seg_ptr = segments[i].segment;
+=======
+    const size_t segment_begin = context.target_segment_idx.value_or(0);
+    const size_t segment_count =
+            context.prepared_segments != nullptr ? context.prepared_segments->size() : segments.size();
+    const size_t segment_end = context.target_segment_idx.has_value() ? *context.target_segment_idx + 1 : segment_count;
+    for (size_t i = segment_begin; i < segment_end; i++) {
+        // Prepared segments are indexed by metadata position and are not pre-filtered by load_segments(),
+        // so apply the metadata filter here; the non-prepared path already carries nullptr placeholders
+        // for filtered segments (handled by the nullptr check below).
+        if (context.prepared_segments != nullptr && skip_segment_idxs.contains(static_cast<int>(i))) {
+            continue;
+        }
+        auto& seg_ptr = context.prepared_segments != nullptr ? (*context.prepared_segments)[i] : segments[i].segment;
+>>>>>>> 46ea6aa ([BugFix] Report physical segment and rowset counts for split lake scans (#80359))
         // Skip segments that were filtered by metadata filter (nullptr placeholders)
         if (seg_ptr == nullptr) {
             continue;
@@ -402,6 +417,15 @@ StatusOr<std::vector<ChunkIteratorPtr>> Rowset::read(const Schema& schema, const
             seg_options.is_first_split_of_segment = options.short_key_ranges_option->is_first_split_of_tablet;
         } else {
             seg_options.is_first_split_of_segment = true;
+        }
+        // A split tablet hands the same segment to several readers (one per rowid range, or one per
+        // short-key range with every segment each). Count every open, and count the segment itself only in
+        // the split that owns its segment-level stats.
+        if (options.stats != nullptr) {
+            options.stats->segments_read_count++;
+            if (seg_options.is_first_split_of_segment) {
+                options.stats->phy_segments_count++;
+            }
         }
 
         auto res = seg_ptr->new_iterator(*segment_schema, seg_options);

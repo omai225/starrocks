@@ -114,7 +114,6 @@ Status TabletReader::prepare() {
         _rowsets = Rowset::get_rowsets(_tablet_mgr, _tablet_metadata);
         _rowsets_inited = true;
     }
-    _stats.rowsets_read_count += _rowsets.size();
     return Status::OK();
 }
 
@@ -125,6 +124,19 @@ Status TabletReader::open(const TabletReaderParams& read_params) {
         return Status::NotSupported("reader type not supported now");
     }
     RETURN_IF_ERROR(init_compaction_column_paths(read_params));
+<<<<<<< HEAD
+=======
+    // Only a reader over the whole tablet (unsplit, or the one planning the splits) counts its rowsets;
+    // every split child carries a rowid or short-key range.
+    if (read_params.rowid_range_option == nullptr && read_params.short_key_ranges_option == nullptr &&
+        read_params.prepared_tablet_read_state == nullptr) {
+        _stats.phy_rowsets_count += _rowsets.size();
+    }
+    if (_collect_iter != nullptr) {
+        _collect_iter->close();
+        _collect_iter.reset();
+    }
+>>>>>>> 46ea6aa ([BugFix] Report physical segment and rowset counts for split lake scans (#80359))
 
     if (_need_split) {
         std::vector<BaseTabletSharedPtr> tablets;
@@ -380,6 +392,52 @@ Status TabletReader::get_segment_iterators(const TabletReaderParams& params, std
 
     SCOPED_RAW_TIMER(&_stats.create_segment_iter_ns);
 
+<<<<<<< HEAD
+=======
+    const auto& prepared_tablet_read_state = params.prepared_tablet_read_state;
+    const bool use_prepared_segments = prepared_tablet_read_state != nullptr;
+    if (use_prepared_segments &&
+        (prepared_tablet_read_state->rowsets.size() != _rowsets.size() ||
+         prepared_tablet_read_state->rowset_segments.size() != prepared_tablet_read_state->rowsets.size() ||
+         prepared_tablet_read_state->rowset_prepared_states.size() != prepared_tablet_read_state->rowsets.size())) {
+        return Status::InvalidArgument("prepared tablet read state does not match reader rowsets");
+    }
+    const bool use_prepared_segment_target = use_prepared_segments && params.prepared_segment_read_state != nullptr;
+    if (use_prepared_segment_target) {
+        if (params.prepared_rowset_index >= _rowsets.size()) {
+            return Status::InvalidArgument("prepared target rowset index exceeds reader rowsets");
+        }
+        const auto rowset_idx = params.prepared_rowset_index;
+        const auto segment_idx = params.prepared_segment_index;
+        auto& rowset = _rowsets[rowset_idx];
+        const auto& prepared_rowset = prepared_tablet_read_state->rowsets[rowset_idx];
+        if (prepared_rowset == nullptr || prepared_rowset->rowset_id() != rowset->rowset_id()) {
+            return Status::InvalidArgument("prepared tablet read state rowset order does not match reader rowsets");
+        }
+        const auto& prepared_segments = prepared_tablet_read_state->rowset_segments[rowset_idx];
+        const auto& prepared_segment_states = prepared_tablet_read_state->rowset_prepared_states[rowset_idx];
+        if (segment_idx >= prepared_segments.size() || segment_idx >= prepared_segment_states.size()) {
+            return Status::InvalidArgument("prepared target segment index exceeds prepared segment state");
+        }
+        if (prepared_segment_states[segment_idx] != params.prepared_segment_read_state) {
+            return Status::InvalidArgument("prepared target segment state does not match split context");
+        }
+        if (_reusable_rowset_iterators.size() < _rowsets.size()) {
+            _reusable_rowset_iterators.resize(_rowsets.size());
+        }
+        ASSIGN_OR_RETURN(auto seg_iters,
+                         enhance_error_prompt(rowset->read_prepared_segment(
+                                 schema(), rs_opts, prepared_segments, segment_idx, params.prepared_segment_read_state,
+                                 &_reusable_rowset_iterators[rowset_idx])));
+        iters->insert(iters->end(), seg_iters.begin(), seg_iters.end());
+        _stats.rowsets_read_count++;
+        return Status::OK();
+    }
+    if (use_prepared_segments) {
+        return Status::InvalidArgument("prepared tablet read state requires a prepared segment target");
+    }
+
+>>>>>>> 46ea6aa ([BugFix] Report physical segment and rowset counts for split lake scans (#80359))
     std::vector<std::future<StatusOr<std::vector<ChunkIteratorPtr>>>> futures;
     // The parallel tasks capture local variables and |this| by reference.
     // Must wait for all tasks to complete before returning, otherwise
@@ -395,6 +453,7 @@ Status TabletReader::get_segment_iterators(const TabletReaderParams& params, std
         if (params.rowid_range_option != nullptr && !params.rowid_range_option->contains_rowset(rowset.get())) {
             continue;
         }
+        _stats.rowsets_read_count++;
 
         if (config::enable_load_segment_parallel) {
             auto task = std::make_shared<std::packaged_task<StatusOr<std::vector<ChunkIteratorPtr>>()>>([&, rowset]() {
